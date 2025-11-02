@@ -11,7 +11,7 @@ SERVER_TCP_PORT = 12345
 BROADCAST_UDP_PORT = 50000
 DATA_SEND_INTERVAL = 2 # Send data every 2 seconds
 
-# Client State
+# Server State
 class ServerState(Enum):
     STANDBY = "STANDBY"
     EVEN = "EVEN"
@@ -26,7 +26,7 @@ client_odd_number = random.randint(1, 5) * 2 - 1 # Odd number between 1 and 9
 
 def listen_for_broadcasts():
     """Listens for UDP broadcast messages from the server to get its state."""
-    global current_server_state
+    global current_server_state, client_running
     listen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listen_socket.bind(('', BROADCAST_UDP_PORT))
@@ -46,7 +46,6 @@ def listen_for_broadcasts():
                     print(f"Received unknown state: {state_str}")
             elif message == "SERVER_STOPPED":
                 print("Server has stopped. Client shutting down.")
-                global client_running
                 client_running = False
                 break
         except socket.timeout:
@@ -57,7 +56,7 @@ def listen_for_broadcasts():
 
 def send_data_to_server():
     """Connects to the TCP server and sends data based on server's state."""
-    global client_running
+    global client_running, current_server_state
     tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         tcp_socket.connect((SERVER_IP, SERVER_TCP_PORT))
@@ -101,10 +100,10 @@ def send_data_to_server():
     finally:
         tcp_socket.close()
         print("Client disconnected from server.")
-        global client_running
         client_running = False
 
 def main():
+    global client_running
     print(f"Client initialized with Even: {client_even_number}, Odd: {client_odd_number}")
 
     # Start threads
@@ -120,9 +119,8 @@ def main():
     except KeyboardInterrupt:
         print("Client shutting down due to KeyboardInterrupt.")
     finally:
-        global client_running
         client_running = False
-        print("Client stopped.")
+        print("Client-side stopped.")
 
 if __name__ == "__main__":
     main()
