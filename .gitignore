@@ -1,3 +1,10 @@
-
 # OS-generated files #
 .DS_Store
+
+# build output / python caches #
+build/
+__pycache__/
+*.pyc
+
+# files waiting to be deleted by hand #
+_to_delete/

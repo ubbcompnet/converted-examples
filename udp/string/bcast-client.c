@@ -1,7 +1,11 @@
+/* udp/string - broadcast client: same, but SO_BROADCAST lets it send to a broadcast address (e.g. 255.255.255.255).
+ * Usage: ./bcast-client <ip> <port> */
 #include <arpa/inet.h>
-#include <ctype.h>
+#include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,138 +13,61 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-int validate_number(char* str)
+/* ---- helpers: TCP is a byte stream, send()/recv() may move fewer bytes than asked ---- */
+
+/* "1..65535" -> port, otherwise -1. */
+static int parse_port(const char *s)
 {
-  while (*str) {
-    if (!isdigit(*str)) { // if the character is not a number, return
-      return 0;
-    }
-    str++; // point to next character
-  }
-  return 1;
+  char *end;
+  long v = strtol(s, &end, 10);
+  if (*s == '\0' || *end != '\0' || v < 1 || v > 65535)
+    return -1;
+  return (int)v;
 }
 
-int validate_ip(char* ip)
-{ // check whether the IP is valid or not
-
-  if (ip == NULL)
-    return 0;
-
-  int num, dots = 0;
-
-  char* ptr;
-
-  char* aux = malloc(strlen(ip) * sizeof(char) + 1);
-
-  memcpy(aux, ip, strlen(ip) + 1);
-
-  ptr = strtok(aux, "."); // cut the string using dor delimiter
-
-  if (ptr == NULL) {
-    free(aux);
-    return 0;
-  }
-
-  while (ptr) {
-    if (!validate_number(
-            ptr)) // check whether the sub string is holding only number or not
-    {
-      free(aux);
-      return 0;
-    }
-
-    num = atoi(ptr); // convert substring to number
-
-    if (num >= 0 && num <= 255) {
-      ptr = strtok(NULL, "."); // cut the next part of the string
-
-      if (ptr != NULL)
-        dots++; // increase the dot count
-    } else {
-      free(aux);
-      return 0;
-    }
-  }
-  if (dots != 3) // if the number of dots are not 3, return false
-  {
-    free(aux);
-    return 0;
-  }
-
-  free(aux);
-  return 1;
+/* Prompt, read one line (spaces allowed), strip the newline. 0 = ok. */
+static int read_line(const char *prompt, char *buf, size_t size)
+{
+  printf("%s", prompt);
+  fflush(stdout);
+  if (!fgets(buf, (int)size, stdin))
+    return -1;
+  buf[strcspn(buf, "\r\n")] = '\0';
+  return 0;
 }
 
-int main(int argc, char** argv)
+#define MAX_MSG 1400 /* stay below the Ethernet MTU: no IP fragmentation */
+
+int main(int argc, char **argv)
 {
-
-  // Validating cli arguments
-
-  if (argc < 3) {
-    printf("Give server and port.\n");
+  int port = argc > 2 ? parse_port(argv[2]) : -1;
+  struct sockaddr_in to;
+  memset(&to, 0, sizeof to);
+  to.sin_family = AF_INET;
+  to.sin_port = htons((uint16_t)(port > 0 ? port : 0));
+  if (port < 0 || inet_pton(AF_INET, argv[1], &to.sin_addr) != 1) {
+    fprintf(stderr, "usage: %s <ipv4-address> <port>\n", argv[0]);
     return 1;
   }
-
-  if (!validate_ip(argv[1])) {
-    printf("Server must be a valid ip address server.\n");
-    return 2;
+  int s = socket(AF_INET, SOCK_DGRAM, 0);
+  if (s < 0) {
+    perror("socket");
+    return 1;
   }
-
-  if (!validate_number(argv[2])) {
-    printf("Port must be integer.\n");
-    return 3;
+  int on = 1;
+  if (setsockopt(s, SOL_SOCKET, SO_BROADCAST, &on, sizeof on) < 0) {
+    perror("setsockopt(SO_BROADCAST)");
+    return 1;
   }
-
-  // Initialising socket
-
-  struct sockaddr_in server;
-
-  int socket_fd;
-
-  printf("Creating socket.\n");
-
-  if ((socket_fd = socket(AF_INET, SOCK_DGRAM, 0)) == 0) {
-    perror("Socket creation failed.\n");
-    exit(EXIT_FAILURE);
+  char line[MAX_MSG + 1];
+  if (read_line("Enter a string: ", line, sizeof line) != 0)
+    return 1;
+  ssize_t n = sendto(s, line, strlen(line), 0, (struct sockaddr *)&to, sizeof to);
+  if (n < 0) {
+    perror("sendto");
+    return 1;
   }
-
-  server.sin_port = htons(atoi(argv[2]));
-  server.sin_family = AF_INET;
-  server.sin_addr.s_addr = inet_addr(argv[1]);
-
-  int broadcastEnable = 1;
-
-  int ret = setsockopt(socket_fd, SOL_SOCKET, SO_BROADCAST, &broadcastEnable,
-                       sizeof(broadcastEnable));
-
-  unsigned int len = sizeof(struct sockaddr_in);
-
-  int lp, l, s;
-
-  char str[100];
-
-  printf("Enter a string (max 100 characters): ");
-
-  scanf("%100s", str);
-
-  l = strlen(str);
-
-  // Converting data from local arhitecture to network arhitecture
-
-  lp = htonl(l);
-
-  // Sending data to server
-
-  s = sendto(socket_fd, &lp, sizeof(int), 0, (struct sockaddr*)&server, len);
-
-  printf("Sent %d bytes to the server\n", s);
-
-  s = sendto(socket_fd, &str, l * sizeof(char), 0, (struct sockaddr*)&server,
-             len);
-
-  printf("Sent %d bytes to the server\n", s);
-
-  close(socket_fd);
-
+  printf("Sent %zd bytes\n", n);
+  close(s);
   return 0;
 }

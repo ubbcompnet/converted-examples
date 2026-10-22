@@ -1,39 +1,36 @@
+"""tcp/string - client. Usage: python client.py <host> <port>"""
+import struct
 import socket
 import sys
 
 
+def send_msg(sock, text):
+    data = text.encode("utf-8")  # encode first: the length must count bytes, not characters
+    sock.sendall(struct.pack("!I", len(data)) + data)
+
+
+def parse_port(text):
+    try:
+        port = int(text)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise SystemExit("Port must be an integer between 1 and 65535.")
+    return port
+
+
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python client.py <server_ip> <port>")
+        print("Usage: python client.py <host> <port>")
         return
-
-    server_ip = sys.argv[1]
+    port = parse_port(sys.argv[2])
+    message = input("Enter a string: ")
     try:
-        port = int(sys.argv[2])
-    except ValueError:
-        print("Port must be an integer.")
-        return
-
-    try:
-        socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        socket_fd.connect((server_ip, port))
-        print(f"Connected to server {server_ip}:{port}")
-
-        message = input("Enter a string (max 100 characters): ")
-        if len(message) > 100:
-            message = message[:100]
-
-        len_bytes = len(message).to_bytes(4, "big")
-        socket_fd.send(len_bytes)
-        print(f"Sent {len(len_bytes)} bytes to the server")
-
-        socket_fd.send(message.encode("utf-8"))
-        print(f"Sent {len(message)} bytes to the server")
-
-    except Exception as e:
+        with socket.create_connection((sys.argv[1], port)) as s:
+            send_msg(s, message)
+            print(f"Sent {len(message.encode('utf-8'))} bytes to the server")
+    except OSError as e:
         print(f"Error: {e}")
-    finally:
-        socket_fd.close()
 
 
 if __name__ == "__main__":

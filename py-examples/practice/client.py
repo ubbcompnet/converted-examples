@@ -1,12 +1,26 @@
 
+import random
 import socket
+import sys
 import threading
 import time
-import random
 from enum import Enum
 
+
+# ---- helpers: TCP is a byte stream, so every read goes through recv_exact() ----
+def recv_exact(sock, n):
+    """Read exactly n bytes; raise ConnectionError if the peer closes early."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("peer closed the connection")
+        buf += chunk
+    return bytes(buf)
+
+
 # Configuration
-SERVER_IP = '127.0.0.1' # Assuming server is on localhost for now
+SERVER_IP = sys.argv[1] if len(sys.argv) > 1 else '127.0.0.1'  # usage: python client.py [server_ip]
 SERVER_TCP_PORT = 12345
 BROADCAST_UDP_PORT = 50000
 DATA_SEND_INTERVAL = 2 # Send data every 2 seconds
@@ -78,12 +92,12 @@ def send_data_to_server():
                 tcp_socket.sendall(len(message).to_bytes(4, 'big') + message)
 
                 # Receive response from server
-                response_len_bytes = tcp_socket.recv(4)
-                if not response_len_bytes:
+                try:
+                    response_len = int.from_bytes(recv_exact(tcp_socket, 4), 'big')
+                    response = recv_exact(tcp_socket, response_len).decode('utf-8')
+                except ConnectionError:
                     print("Server disconnected.")
                     break
-                response_len = int.from_bytes(response_len_bytes, 'big')
-                response = tcp_socket.recv(response_len).decode('utf-8')
                 print(f"Server response: {response}")
 
                 if response == "SERVER_STOPPED":

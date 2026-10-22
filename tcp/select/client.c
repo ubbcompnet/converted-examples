@@ -1,7 +1,13 @@
+/* tcp/select - chat client: select() on the keyboard and the socket.
+ * Usage: ./client <host> <port> */
+#include <sys/select.h>
+
 #include <arpa/inet.h>
-#include <ctype.h>
+#include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,170 +15,109 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-int validate_number(char* str)
+/* ---- helpers: TCP is a byte stream, send()/recv() may move fewer bytes than asked ---- */
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0 /* macOS: SIGPIPE is ignored instead */
+#endif
+
+/* Send exactly n bytes. 0 = ok, -1 = error. */
+static int send_all(int fd, const void *buf, size_t n)
 {
-  while (*str) {
-    if (!isdigit(*str)) { // if the character is not a number, return
-      return 0;
+  const char *p = buf;
+  while (n > 0) {
+    ssize_t k = send(fd, p, n, MSG_NOSIGNAL);
+    if (k < 0) {
+      if (errno == EINTR)
+        continue;
+      return -1;
     }
-    str++; // point to next character
+    p += k;
+    n -= (size_t)k;
   }
-  return 1;
+  return 0;
 }
 
-int validate_ip(char* ip)
-{ // check whether the IP is valid or not
-
-  if (ip == NULL)
-    return 0;
-
-  int num, dots = 0;
-
-  char* ptr;
-
-  char* aux = malloc(strlen(ip) * sizeof(char) + 1);
-
-  memcpy(aux, ip, strlen(ip) + 1);
-
-  ptr = strtok(aux, "."); // cut the string using dor delimiter
-
-  if (ptr == NULL) {
-    free(aux);
-    return 0;
-  }
-
-  while (ptr) {
-    if (!validate_number(
-            ptr)) // check whether the sub string is holding only number or not
-    {
-      free(aux);
-      return 0;
-    }
-
-    num = atoi(ptr); // convert substring to number
-
-    if (num >= 0 && num <= 255) {
-      ptr = strtok(NULL, "."); // cut the next part of the string
-
-      if (ptr != NULL)
-        dots++; // increase the dot count
-    } else {
-      free(aux);
-      return 0;
-    }
-  }
-  if (dots != 3) // if the number of dots are not 3, return false
-  {
-    free(aux);
-    return 0;
-  }
-
-  free(aux);
-  return 1;
+/* "1..65535" -> port, otherwise -1. */
+static int parse_port(const char *s)
+{
+  char *end;
+  long v = strtol(s, &end, 10);
+  if (*s == '\0' || *end != '\0' || v < 1 || v > 65535)
+    return -1;
+  return (int)v;
 }
 
-int main(int argc, char** argv)
+/* Connect to host:port (name or IP, IPv4/IPv6). Returns fd or -1. */
+static int tcp_connect(const char *host, int port)
 {
+  signal(SIGPIPE, SIG_IGN);
+  struct addrinfo hints, *res, *p;
+  memset(&hints, 0, sizeof hints);
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  char ps[16];
+  snprintf(ps, sizeof ps, "%d", port);
+  if (getaddrinfo(host, ps, &hints, &res) != 0)
+    return -1;
+  int fd = -1;
+  for (p = res; p; p = p->ai_next) {
+    fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+    if (fd < 0)
+      continue;
+    if (connect(fd, p->ai_addr, p->ai_addrlen) == 0)
+      break;
+    close(fd);
+    fd = -1;
+  }
+  freeaddrinfo(res);
+  return fd;
+}
 
-  // Validating cli arguments
-
-  if (argc < 3) {
-    printf("Give server and port.\n");
+int main(int argc, char **argv)
+{
+  int port = argc > 2 ? parse_port(argv[2]) : -1;
+  if (port < 0) {
+    fprintf(stderr, "usage: %s <host> <port>\n", argv[0]);
+    return 1;
+  }
+  int c = tcp_connect(argv[1], port);
+  if (c < 0) {
+    perror("connect");
     return 1;
   }
 
-  if (!validate_ip(argv[1])) {
-    printf("Server must be a valid ip address server.\n");
-    return 2;
-  }
-
-  if (!validate_number(argv[2])) {
-    printf("Port must be integer.\n");
-    return 3;
-  }
-
-  // Initialising socket
-
-  struct sockaddr_in server;
-
-  int socket_fd;
-
-  printf("Creating socket.\n");
-
-  if ((socket_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-    perror("Socket creation failed.\n");
-    exit(EXIT_FAILURE);
-  }
-
-  server.sin_port = htons(atoi(argv[2]));
-  server.sin_family = AF_INET;
-  server.sin_addr.s_addr = inet_addr(argv[1]);
-
-  fd_set read_fds;
-  fd_set master;
-
-  char buf[512];
-
-  printf("Connecting to server %s:%s.\n", argv[1], argv[2]);
-
-  // Checking if the connection was successfull
-
-  if (connect(socket_fd, (struct sockaddr*)&server, sizeof(server)) < 0) {
-    perror("Connection error.\n");
-    exit(EXIT_FAILURE);
-  }
-
-  recv(socket_fd, buf, sizeof(buf), 0);
-
-  printf("%s\n", buf);
-
-  FD_ZERO(&read_fds); // clear the set
-
-  FD_ZERO(&master);
-
-  FD_SET(0, &master);
-
-  FD_SET(socket_fd, &master);
-
-  while (1) {
-    read_fds = master;
-
-    if (select(socket_fd + 1, &read_fds, NULL, NULL, NULL) == -1) {
-      perror("Select error.\n");
-
-      exit(EXIT_FAILURE);
+  for (;;) {
+    fd_set rd;
+    FD_ZERO(&rd);
+    FD_SET(STDIN_FILENO, &rd);
+    FD_SET(c, &rd);
+    if (select(c + 1, &rd, NULL, NULL, NULL) < 0) {
+      if (errno == EINTR)
+        continue;
+      perror("select");
+      return 1;
     }
-
-    int nbytes;
-
-    if (FD_ISSET(0, &read_fds)) {
-
-      char buf[512];
-
-      nbytes = read(0, buf, sizeof(buf) - 1);
-
-      int ret = send(socket_fd, buf, nbytes, 0);
-
-      if (ret <= 0) {
-
-        perror("Send error\n");
-
-        exit(EXIT_FAILURE);
+    char buf[512];
+    if (FD_ISSET(STDIN_FILENO, &rd)) {
+      ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+      if (n <= 0) /* Ctrl-D */
+        break;
+      if (send_all(c, buf, (size_t)n) != 0) {
+        perror("send");
+        return 1;
       }
     }
-    if (FD_ISSET(socket_fd, &read_fds)) {
-
-      nbytes = recv(socket_fd, buf, sizeof(buf) - 1, 0);
-
-      if (nbytes <= 0) {
-
-        printf("Server has closed connection...\n");
-
-        exit(2);
+    if (FD_ISSET(c, &rd)) {
+      ssize_t n = recv(c, buf, sizeof buf, 0);
+      if (n <= 0) {
+        printf("Server has closed the connection...\n");
+        return 2;
       }
-
-      write(1, buf, nbytes);
+      fwrite(buf, 1, (size_t)n, stdout);
+      fflush(stdout);
     }
   }
+  close(c);
   return 0;
 }

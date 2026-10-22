@@ -1,81 +1,100 @@
+"""tcp/hangman - server (thread per client). Same protocol as the C server.
 
+server -> client : word length (u32)
+then repeat:
+  client -> server : one ASCII letter (1 byte)
+  server -> client : code (u32)
+      1 = found: count (u32) + count x index (u32); if that completed the word, 2 follows
+      0 = wrong letter        2 = you won        3 = you lost (no chances left)
+Usage: python server.py <port>"""
 import socket
+import random
+import struct
 import sys
 import threading
-import random
 
-WORDS = ["dimethyltryptamine", "failure", "methanol", "interdisciplinarity", "depresion", "phenylpropanolamine"]
 
-def handle_client(client_socket, client_address):
-    print(f"New client connected: {client_address}")
+# ---- helpers: TCP is a byte stream, so every read goes through recv_exact() ----
+def recv_exact(sock, n):
+    """Read exactly n bytes; raise ConnectionError if the peer closes early."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("peer closed the connection")
+        buf += chunk
+    return bytes(buf)
+
+
+def send_u32(sock, value):
+    sock.sendall(struct.pack("!I", value))
+
+
+def make_listener(port, host=""):
+    """TCP listening socket with SO_REUSEADDR (restart without 'Address already in use')."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((host, port))
+    s.listen(16)
+    return s
+
+
+def parse_port(text):
     try:
-        word = random.choice(WORDS)
-        chances = random.randint(5, 8)
-        guessed_word = ['_'] * len(word)
-        remaining_letters = len(word)
+        port = int(text)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise SystemExit("Port must be an integer between 1 and 65535.")
+    return port
 
-        print(f"Client {client_address} has to guess word: {word} in {chances} shots")
 
-        client_socket.send(len(word).to_bytes(4, 'big'))
-        print(f"Sent to client {client_address} word length: {len(word)}")
+WORDS = ["dimethyltryptamine", "failure", "methanol", "interdisciplinarity",
+         "depression", "phenylpropanolamine"]
 
-        while chances > 0 and remaining_letters > 0:
-            letter_byte = client_socket.recv(1)
-            if not letter_byte:
-                print(f"Client {client_address} disconnected.")
-                return
-            
-            letter = letter_byte.decode('utf-8')
-            print(f"{client_address}: {letter}")
 
-            if letter in word:
-                indices = [i for i, l in enumerate(word) if l == letter]
-                for i in indices:
-                    if guessed_word[i] == '_':
-                        guessed_word[i] = letter
-                        remaining_letters -= 1
-                
-                client_socket.send((1).to_bytes(4, 'big')) # Found letter
-                client_socket.send(len(indices).to_bytes(4, 'big'))
-                for i in indices:
-                    client_socket.send(i.to_bytes(4, 'big'))
-            else:
-                chances -= 1
-                client_socket.send((0).to_bytes(4, 'big')) # Wrong letter
+def handle_client(conn, addr):
+    print(f"New client connected: {addr}")
+    try:
+        with conn:
+            word = random.choice(WORDS)
+            chances = random.randint(5, 8)
+            revealed = [False] * len(word)
+            print(f"Client {addr} has to guess '{word}' with {chances} wrong shots")
+            send_u32(conn, len(word))
 
-        if remaining_letters == 0:
-            client_socket.send((2).to_bytes(4, 'big')) # Win
-            print(f"Client {client_address} won.")
-        else:
-            client_socket.send((3).to_bytes(4, 'big')) # Lose
-            print(f"Client {client_address} lost.")
+            while True:
+                letter = recv_exact(conn, 1).decode("ascii", errors="replace")
+                indices = [i for i, ch in enumerate(word) if ch == letter]
+                if indices:
+                    for i in indices:
+                        revealed[i] = True
+                    conn.sendall(struct.pack(f"!II{len(indices)}I", 1, len(indices), *indices))
+                    if all(revealed):
+                        send_u32(conn, 2)
+                        print(f"Client {addr} won")
+                        return
+                else:
+                    chances -= 1
+                    if chances == 0:
+                        send_u32(conn, 3)
+                        print(f"Client {addr} lost")
+                        return
+                    send_u32(conn, 0)
+    except (ConnectionError, OSError) as e:
+        print(f"Client {addr}: {e}")
 
-    except Exception as e:
-        print(f"Error handling client {client_address}: {e}")
-    finally:
-        client_socket.close()
-        print(f"Connection with {client_address} closed.")
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: python server.py <port>")
         return
-
-    try:
-        port = int(sys.argv[1])
-    except ValueError:
-        print("Port must be an integer.")
-        return
-
-    server_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_fd.bind(("", port))
-    server_fd.listen(5)
-    print(f"Server listening on port {port}")
-
+    srv = make_listener(parse_port(sys.argv[1]))
+    print(f"hangman server listening on port {srv.getsockname()[1]}")
     while True:
-        client, addr = server_fd.accept()
-        client_handler = threading.Thread(target=handle_client, args=(client, addr))
-        client_handler.start()
+        conn, addr = srv.accept()
+        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+
 
 if __name__ == "__main__":
     main()

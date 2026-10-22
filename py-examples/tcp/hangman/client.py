@@ -1,58 +1,73 @@
-
+"""tcp/hangman - client (works with the Python and the C server).
+Usage: python client.py <server_ip> <port>"""
+import struct
 import socket
 import sys
+
+
+# ---- helpers: TCP is a byte stream, so every read goes through recv_exact() ----
+def recv_exact(sock, n):
+    """Read exactly n bytes; raise ConnectionError if the peer closes early."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("peer closed the connection")
+        buf += chunk
+    return bytes(buf)
+
+
+def recv_u32(sock):
+    return struct.unpack("!I", recv_exact(sock, 4))[0]
+
+
+def parse_port(text):
+    try:
+        port = int(text)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise SystemExit("Port must be an integer between 1 and 65535.")
+    return port
+
 
 def main():
     if len(sys.argv) < 3:
         print("Usage: python client.py <server_ip> <port>")
         return
-
-    server_ip = sys.argv[1]
+    port = parse_port(sys.argv[2])
     try:
-        port = int(sys.argv[2])
-    except ValueError:
-        print("Port must be an integer.")
-        return
+        with socket.create_connection((sys.argv[1], port)) as s:
+            word_len = recv_u32(s)
+            guessed = ["_"] * word_len
+            print(f"Word length: {word_len}")
+            print(" ".join(guessed))
 
-    try:
-        socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        socket_fd.connect((server_ip, port))
-        print(f"Connected to server {server_ip}:{port}")
+            while True:
+                letter = input("Guess a letter: ").strip().lower()
+                if len(letter) != 1 or not letter.isascii() or not letter.isalpha():
+                    print("Enter exactly one letter a-z.")
+                    continue
+                s.sendall(letter.encode("ascii"))
 
-        word_len_bytes = socket_fd.recv(4)
-        word_len = int.from_bytes(word_len_bytes, 'big')
-        guessed_word = ['_'] * word_len
-        print(f"Word length: {word_len}")
-        print(" ".join(guessed_word))
-
-        while True:
-            letter = input("Guess a letter: ")[0]
-            socket_fd.send(letter.encode('utf-8'))
-
-            response_code_bytes = socket_fd.recv(4)
-            response_code = int.from_bytes(response_code_bytes, 'big')
-
-            if response_code == 1: # Found letter
-                count_bytes = socket_fd.recv(4)
-                count = int.from_bytes(count_bytes, 'big')
-                for _ in range(count):
-                    index_bytes = socket_fd.recv(4)
-                    index = int.from_bytes(index_bytes, 'big')
-                    guessed_word[index] = letter
-                print(" ".join(guessed_word))
-            elif response_code == 0: # Wrong letter
-                print("Wrong guess!")
-            elif response_code == 2: # Win
-                print("You won!")
-                break
-            elif response_code == 3: # Lose
-                print("You lost!")
-                break
-
-    except Exception as e:
+                code = recv_u32(s)
+                if code == 1:  # found
+                    for _ in range(recv_u32(s)):
+                        guessed[recv_u32(s)] = letter
+                    print(" ".join(guessed))
+                    if "_" not in guessed:  # the server now sends the final code
+                        code = recv_u32(s)
+                if code == 0:
+                    print("Wrong guess!")
+                elif code == 2:
+                    print("You won!")
+                    break
+                elif code == 3:
+                    print("You lost!")
+                    break
+    except (ConnectionError, OSError) as e:
         print(f"Error: {e}")
-    finally:
-        socket_fd.close()
+
 
 if __name__ == "__main__":
     main()

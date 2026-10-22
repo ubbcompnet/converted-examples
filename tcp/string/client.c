@@ -1,161 +1,123 @@
-#include <unistd.h>
+/* tcp/string - client. Usage: ./client <host> <port> */
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-#include <ctype.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 
-int
-validate_number (char *str)
+/* ---- helpers: TCP is a byte stream, send()/recv() may move fewer bytes than asked ---- */
+
+#define MAX_STR (1u << 20) /* largest string accepted from the network */
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0 /* macOS: SIGPIPE is ignored instead */
+#endif
+
+/* Send exactly n bytes. 0 = ok, -1 = error. */
+static int send_all(int fd, const void *buf, size_t n)
 {
-  while (*str)
-    {
-      if (!isdigit (*str))
-	{			//if the character is not a number, return
-	  return 0;
-	}
-      str++;			//point to next character
+  const char *p = buf;
+  while (n > 0) {
+    ssize_t k = send(fd, p, n, MSG_NOSIGNAL);
+    if (k < 0) {
+      if (errno == EINTR)
+        continue;
+      return -1;
     }
-  return 1;
+    p += k;
+    n -= (size_t)k;
+  }
+  return 0;
 }
 
-int
-validate_ip (char *ip)
-{				//check whether the IP is valid or not
-
-  if (ip == NULL)
-    return 0;
-
-  int num, dots = 0;
-
-  char *ptr;
-
-  char *aux = malloc (strlen (ip) * sizeof (char) + 1);
-
-  memcpy (aux, ip, strlen (ip) + 1);
-
-  ptr = strtok (aux, ".");	//cut the string using dor delimiter
-
-  if (ptr == NULL)
-    {
-      free (aux);
-      return 0;
-    }
-
-  while (ptr)
-    {
-      if (!validate_number (ptr))	//check whether the sub string is holding only number or not 
-	{
-	  free (aux);
-	  return 0;
-	}
-
-      num = atoi (ptr);		//convert substring to number
-
-      if (num >= 0 && num <= 255)
-	{
-	  ptr = strtok (NULL, ".");	//cut the next part of the string
-
-	  if (ptr != NULL)
-	    dots++;		//increase the dot count
-	}
-      else
-	{
-	  free (aux);
-	  return 0;
-	}
-    }
-  if (dots != 3)		//if the number of dots are not 3, return false
-    {
-      free (aux);
-      return 0;
-    }
-
-  free (aux);
-  return 1;
+static int send_u32(int fd, uint32_t v)
+{
+  uint32_t n = htonl(v);
+  return send_all(fd, &n, sizeof n);
 }
 
-int
-main (int argc, char **argv)
+/* String = u32 length + bytes. */
+static int send_str(int fd, const char *s, size_t len)
 {
+  if (len > MAX_STR || send_u32(fd, (uint32_t)len) != 0)
+    return -1;
+  return send_all(fd, s, len);
+}
 
-  //Validating cli arguments
+/* "1..65535" -> port, otherwise -1. */
+static int parse_port(const char *s)
+{
+  char *end;
+  long v = strtol(s, &end, 10);
+  if (*s == '\0' || *end != '\0' || v < 1 || v > 65535)
+    return -1;
+  return (int)v;
+}
 
-  if (argc < 3)
-    {
-      printf ("Give server and port.\n");
-      return 1;
-    }
+/* Prompt, read one line (spaces allowed), strip the newline. 0 = ok. */
+static int read_line(const char *prompt, char *buf, size_t size)
+{
+  printf("%s", prompt);
+  fflush(stdout);
+  if (!fgets(buf, (int)size, stdin))
+    return -1;
+  buf[strcspn(buf, "\r\n")] = '\0';
+  return 0;
+}
 
-  if (!validate_ip (argv[1]))
-    {
-      printf ("Server must be a valid ip address server.\n");
-      return 2;
-    }
+/* Connect to host:port (name or IP, IPv4/IPv6). Returns fd or -1. */
+static int tcp_connect(const char *host, int port)
+{
+  signal(SIGPIPE, SIG_IGN);
+  struct addrinfo hints, *res, *p;
+  memset(&hints, 0, sizeof hints);
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  char ps[16];
+  snprintf(ps, sizeof ps, "%d", port);
+  if (getaddrinfo(host, ps, &hints, &res) != 0)
+    return -1;
+  int fd = -1;
+  for (p = res; p; p = p->ai_next) {
+    fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+    if (fd < 0)
+      continue;
+    if (connect(fd, p->ai_addr, p->ai_addrlen) == 0)
+      break;
+    close(fd);
+    fd = -1;
+  }
+  freeaddrinfo(res);
+  return fd;
+}
 
-  if (!validate_number (argv[2]))
-    {
-      printf ("Port must be integer.\n");
-      return 3;
-    }
-
-  //Initialising socket
-
-  struct sockaddr_in server;
-
-  int socket_fd;
-
-  printf ("Creating socket.\n");
-
-  if ((socket_fd = socket (AF_INET, SOCK_STREAM, 0)) == 0)
-    {
-      perror ("Socket creation failed.\n");
-      exit (EXIT_FAILURE);
-    }
-
-  server.sin_port = htons (atoi (argv[2]));
-  server.sin_family = AF_INET;
-  server.sin_addr.s_addr = inet_addr (argv[1]);
-
-  printf ("Connecting to server %s:%s.\n", argv[1], argv[2]);
-
-  //Checking if the connection was successfull
-
-  if (connect (socket_fd, (struct sockaddr *) &server, sizeof (server)) < 0)
-    {
-      perror ("Connection error.\n");
-      exit (EXIT_FAILURE);
-    }
-
-  int lp, l, s;
-
-  char str[100];
-
-  printf ("Enter a string (max 100 characters): ");
-
-  scanf ("%100s", str);
-
-  l = strlen (str);
-  
-  //Converting data from local arhitecture to network arhitecture
-
-  lp = htons (l);
-
-  //Sending data to server
-
-  s = send (socket_fd, &lp, sizeof (int), 0);
-
-  printf ("Sent %d bytes to the server\n", s);
-
-  s = send (socket_fd, str, l * sizeof (char), 0);
-
-  printf ("Sent %d bytes to the server\n", s);
-
-  close (socket_fd);
-
+int main(int argc, char **argv)
+{
+  int port = argc > 2 ? parse_port(argv[2]) : -1;
+  if (port < 0) {
+    fprintf(stderr, "usage: %s <host> <port>\n", argv[0]);
+    return 1;
+  }
+  char line[1024];
+  if (read_line("Enter a string: ", line, sizeof line) != 0) return 1;
+  int c = tcp_connect(argv[1], port);
+  if (c < 0) {
+    perror("connect");
+    return 1;
+  }
+  if (send_str(c, line, strlen(line)) != 0) {
+    fprintf(stderr, "send error\n");
+    close(c);
+    return 1;
+  }
+  printf("Sent %zu bytes\n", strlen(line));
+  close(c);
   return 0;
 }

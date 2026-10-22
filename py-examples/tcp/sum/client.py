@@ -1,40 +1,53 @@
-
+"""tcp/sum - client. Usage: python client.py <host> <port>"""
 import socket
+import struct
 import sys
+
+
+# ---- helpers: TCP is a byte stream, so every read goes through recv_exact() ----
+def recv_exact(sock, n):
+    """Read exactly n bytes; raise ConnectionError if the peer closes early."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("peer closed the connection")
+        buf += chunk
+    return bytes(buf)
+
+
+def parse_port(text):
+    try:
+        port = int(text)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise SystemExit("Port must be an integer between 1 and 65535.")
+    return port
+
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python client.py <server_ip> <port>")
+        print("Usage: python client.py <host> <port>")
         return
-
-    server_ip = sys.argv[1]
+    port = parse_port(sys.argv[2])
     try:
-        port = int(sys.argv[2])
-    except ValueError:
-        print("Port must be an integer.")
-        return
-
-    try:
-        socket_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        socket_fd.connect((server_ip, port))
-        print(f"Connected to server {server_ip}:{port}")
-
         a = int(input("Give a number: "))
-        socket_fd.send(a.to_bytes(4, 'big'))
-        print(f"Sent {a} to the server")
-
         b = int(input("Give a number: "))
-        socket_fd.send(b.to_bytes(4, 'big'))
-        print(f"Sent {b} to the server")
-
-        sum_bytes = socket_fd.recv(4)
-        sum_val = int.from_bytes(sum_bytes, 'big')
-        print(f"Received from the server: {sum_val}")
-
-    except Exception as e:
+        if not (-2**31 <= a < 2**31 and -2**31 <= b < 2**31):
+            print("Numbers must fit in 32 bits (signed).")
+            return
+    except ValueError:
+        print("Please enter integers.")
+        return
+    try:
+        with socket.create_connection((sys.argv[1], port)) as s:
+            s.sendall(struct.pack("!ii", a, b))
+            (total,) = struct.unpack("!q", recv_exact(s, 8))
+            print(f"Received from the server: {total}")
+    except (ConnectionError, OSError) as e:
         print(f"Error: {e}")
-    finally:
-        socket_fd.close()
+
 
 if __name__ == "__main__":
     main()

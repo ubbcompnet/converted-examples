@@ -1,60 +1,75 @@
-
+"""tcp/select - chat server: ONE thread, select() multiplexes all clients.
+Every line a client sends is forwarded to the others. Messages are text lines ending in '\n'.
+Usage: python server.py <port>"""
 import socket
 import select
 import sys
+
+
+def make_listener(port, host=""):
+    """TCP listening socket with SO_REUSEADDR (restart without 'Address already in use')."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((host, port))
+    s.listen(16)
+    return s
+
+
+def parse_port(text):
+    try:
+        port = int(text)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise SystemExit("Port must be an integer between 1 and 65535.")
+    return port
+
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: python server.py <port>")
         return
+    server = make_listener(parse_port(sys.argv[1]))
+    print(f"chat server listening on port {server.getsockname()[1]}")
 
-    try:
-        port = int(sys.argv[1])
-    except ValueError:
-        print("Port must be an integer.")
-        return
+    ids = {}  # socket -> client number (stays stable when other clients leave)
+    next_id = 0
+    inputs = [server]
 
-    server_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_fd.setblocking(False)
-    server_fd.bind(("", port))
-    server_fd.listen(5)
-
-    inputs = [server_fd]
-    client_count = 0
-
-    print(f"Server listening on port {port}")
-
-    while inputs:
+    while True:
         readable, _, _ = select.select(inputs, [], [])
-
         for s in readable:
-            if s is server_fd:
-                conn, addr = s.accept()
-                print(f"New client connected: {addr}")
-                conn.setblocking(False)
+            if s is server:
+                conn, addr = server.accept()
+                next_id += 1
+                ids[conn] = next_id
                 inputs.append(conn)
-                client_count += 1
-                conn.send(f"Welcome to the server! You are client {client_count}".encode('utf-8'))
-            else:
-                try:
-                    data = s.recv(1024)
-                    if data:
-                        message = f"Client {inputs.index(s)} says: {data.decode('utf-8').strip()}"
-                        print(message)
-                        for client in inputs:
-                            if client != server_fd and client != s:
-                                try:
-                                    client.send(message.encode('utf-8'))
-                                except Exception as e:
-                                    print(f"Error sending to client: {e}")
-                    else:
-                        print(f"Client {inputs.index(s)} hung up.")
-                        inputs.remove(s)
-                        s.close()
-                except ConnectionResetError:
-                    print(f"Client {inputs.index(s)} reset the connection.")
-                    inputs.remove(s)
-                    s.close()
+                print(f"client {next_id} connected from {addr}")
+                conn.sendall(f"Welcome to the server! You are client {next_id}\n".encode())
+                continue
+
+            try:
+                data = s.recv(1024)
+            except OSError:
+                data = b""
+            if not data:
+                print(f"client {ids[s]} hung up")
+                inputs.remove(s)
+                del ids[s]
+                s.close()
+                continue
+
+            message = f"Client {ids[s]} says: ".encode() + data
+            if not message.endswith(b"\n"):
+                message += b"\n"
+            print(message.decode("utf-8", errors="replace"), end="")
+            for other in inputs[1:]:
+                if other is not s:
+                    try:
+                        other.sendall(message)
+                    except OSError as e:
+                        print(f"Error sending to client {ids[other]}: {e}")
+
 
 if __name__ == "__main__":
     main()

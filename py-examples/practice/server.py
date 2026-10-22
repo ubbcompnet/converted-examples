@@ -1,8 +1,22 @@
 
 import socket
+import sys
 import threading
 import time
 from enum import Enum
+
+
+# ---- helpers: TCP is a byte stream, so every read goes through recv_exact() ----
+def recv_exact(sock, n):
+    """Read exactly n bytes; raise ConnectionError if the peer closes early."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("peer closed the connection")
+        buf += chunk
+    return bytes(buf)
+
 
 # Configuration
 MIN_CLIENTS = 2
@@ -41,6 +55,14 @@ def broadcast_state():
         except Exception as e:
             print(f"Error broadcasting state: {e}")
         time.sleep(1) # Broadcast every second
+    # Tell clients that are not talking to us right now (STANDBY) that we are gone.
+    # UDP may lose a datagram, so send it a few times.
+    for _ in range(3):
+        try:
+            broadcast_socket.sendto(b"SERVER_STOPPED", (BROADCAST_IP, BROADCAST_UDP_PORT))
+        except Exception:
+            pass
+        time.sleep(0.1)
     broadcast_socket.close()
 
 def handle_client(client_socket, client_address):
@@ -50,15 +72,10 @@ def handle_client(client_socket, client_address):
     print(f"Client {client_address} connected.")
     try:
         while server_running:
-            data_len_bytes = client_socket.recv(4)
-            if not data_len_bytes:
-                break # Client disconnected
-            data_len = int.from_bytes(data_len_bytes, 'big')
-
-            received_data_bytes = client_socket.recv(data_len)
-            if not received_data_bytes:
-                break # Client disconnected
-            received_value = int(received_data_bytes.decode('utf-8'))
+            data_len = int.from_bytes(recv_exact(client_socket, 4), 'big')  # raises ConnectionError on disconnect
+            if data_len > 32:
+                break # not our protocol
+            received_value = int(recv_exact(client_socket, data_len).decode('utf-8'))
 
             with state_lock:
                 if current_state == ServerState.STANDBY:
@@ -85,8 +102,8 @@ def handle_client(client_socket, client_address):
             if not server_running:
                 break
 
-    except Exception as e:
-        print(f"Error handling client {client_address}: {e}")
+    except (ConnectionError, ValueError, OSError) as e:
+        print(f"Client {client_address}: {e}")
     finally:
         print(f"Client {client_address} disconnected.")
         with state_lock:
@@ -134,7 +151,8 @@ def main():
     print(f"TCP Server listening on port {SERVER_TCP_PORT}")
 
     # Start broadcast and state manager threads
-    threading.Thread(target=broadcast_state, daemon=True).start()
+    broadcaster = threading.Thread(target=broadcast_state, daemon=True)
+    broadcaster.start()
     threading.Thread(target=state_manager, daemon=True).start()
 
     try:
@@ -155,6 +173,7 @@ def main():
         print("Server shutting down due to KeyboardInterrupt.")
     finally:
         server_running = False
+        broadcaster.join(timeout=2)  # let it send SERVER_STOPPED
         for sock, _ in connected_clients:
             sock.close()
         tcp_server_socket.close()

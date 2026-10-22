@@ -1,206 +1,157 @@
-#include <sys/types.h>
-#include <stdio.h>
-#include <ctype.h>
-#include <sys/socket.h>
-#include <stdlib.h>
-#include <netinet/in.h>
-#include <string.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <sys/wait.h>
+/* tcp/select - chat server: ONE process, select() multiplexes all clients.
+ * Every line a client sends is forwarded to all the other clients.
+ * Messages are plain text lines ending in '\n'.
+ * Usage: ./server <port> */
+#include <sys/select.h>
 
-int
-validate_number (char *str)
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+/* ---- helpers: TCP is a byte stream, send()/recv() may move fewer bytes than asked ---- */
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0 /* macOS: SIGPIPE is ignored instead */
+#endif
+
+/* Send exactly n bytes. 0 = ok, -1 = error. */
+static int send_all(int fd, const void *buf, size_t n)
 {
-  while (*str)
-    {
-      if (!isdigit (*str))
-	{			//if the character is not a number, return
-	  return 0;
-	}
-      str++;			//point to next character
+  const char *p = buf;
+  while (n > 0) {
+    ssize_t k = send(fd, p, n, MSG_NOSIGNAL);
+    if (k < 0) {
+      if (errno == EINTR)
+        continue;
+      return -1;
     }
-  return 1;
+    p += k;
+    n -= (size_t)k;
+  }
+  return 0;
 }
 
-
-int
-main (int argc, char **argv)
+/* "1..65535" -> port, otherwise -1. */
+static int parse_port(const char *s)
 {
-  //Validating cmd arguments
+  char *end;
+  long v = strtol(s, &end, 10);
+  if (*s == '\0' || *end != '\0' || v < 1 || v > 65535)
+    return -1;
+  return (int)v;
+}
 
-  if (argc < 2)
-    {
-      printf ("Give me a port.\n");
+/* "ip:port" of a peer, for log messages. */
+static const char *peer_str(const struct sockaddr_in *a, char *buf, size_t n)
+{
+  char ip[INET_ADDRSTRLEN];
+  inet_ntop(AF_INET, &a->sin_addr, ip, sizeof ip);
+  snprintf(buf, n, "%s:%u", ip, (unsigned)ntohs(a->sin_port));
+  return buf;
+}
+
+/* TCP listener on all interfaces. Returns fd or -1. */
+static int tcp_listen(int port)
+{
+  signal(SIGPIPE, SIG_IGN); /* a vanished client must not kill the server */
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0)
+    return -1;
+  int one = 1;
+  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in a;
+  memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_ANY);
+  a.sin_port = htons((uint16_t)port);
+  if (bind(s, (struct sockaddr *)&a, sizeof a) < 0 || listen(s, 16) < 0) {
+    close(s);
+    return -1;
+  }
+  return s;
+}
+
+int main(int argc, char **argv)
+{
+  int port = argc > 1 ? parse_port(argv[1]) : -1;
+  if (port < 0) {
+    fprintf(stderr, "usage: %s <port>\n", argv[0]);
+    return 1;
+  }
+  int server = tcp_listen(port);
+  if (server < 0) {
+    perror("listen");
+    return 1;
+  }
+  printf("chat server on port %d\n", port);
+
+  fd_set master, readable;
+  FD_ZERO(&master);
+  FD_SET(server, &master);
+  int fdmax = server;
+  int ids[FD_SETSIZE] = {0}; /* socket -> client number (stays stable when others leave) */
+  int next_id = 0;
+
+  for (;;) {
+    readable = master;
+    if (select(fdmax + 1, &readable, NULL, NULL, NULL) < 0) {
+      if (errno == EINTR)
+        continue;
+      perror("select");
       return 1;
     }
+    for (int i = 0; i <= fdmax; i++) {
+      if (!FD_ISSET(i, &readable))
+        continue;
 
-  if (!validate_number (argv[1]))
-    {
-      printf ("Port must be integer.\n");
-      return 2;
+      if (i == server) {
+        struct sockaddr_in peer;
+        socklen_t len = sizeof peer;
+        int c = accept(server, (struct sockaddr *)&peer, &len);
+        if (c < 0) {
+          perror("accept");
+          continue;
+        }
+        if (c >= FD_SETSIZE) { /* select() cannot watch it */
+          close(c);
+          continue;
+        }
+        FD_SET(c, &master);
+        if (c > fdmax)
+          fdmax = c;
+        ids[c] = ++next_id;
+        char who[64], msg[128];
+        printf("client %d connected from %s\n", ids[c], peer_str(&peer, who, sizeof who));
+        int n = snprintf(msg, sizeof msg, "Welcome to the server! You are client %d\n", ids[c]);
+        send_all(c, msg, (size_t)n);
+      } else {
+        char buf[512];
+        ssize_t n = recv(i, buf, sizeof buf - 1, 0);
+        if (n <= 0) {
+          printf("client %d hung up\n", ids[i]);
+          close(i);
+          FD_CLR(i, &master);
+          continue;
+        }
+        buf[n] = '\0';
+        char out[1024];
+        int m = snprintf(out, sizeof out, "Client %d says: %s", ids[i], buf);
+        if (m >= (int)sizeof out)
+          m = (int)sizeof out - 1;
+        for (int j = 0; j <= fdmax; j++)
+          if (FD_ISSET(j, &master) && j != server && j != i)
+            if (send(j, out, (size_t)m, MSG_NOSIGNAL) < 0)
+              perror("send");
+      }
     }
-
-  //Initializing socket
-
-  int fdmax, client_count, server_fd;
-
-  struct sockaddr_in server_addr;
-
-  int addrlen = sizeof (server_addr);
-
-  printf ("Creating socket.\n");
-
-  char buf[512];
-
-  fd_set master;
-
-  fd_set read_fds;
-
-  if ((server_fd = socket (AF_INET, SOCK_STREAM, 0)) == 0)
-    {
-      perror ("Socket creation failed\n");
-      exit (EXIT_FAILURE);
-    }
-
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  //Seting socket to listen on all available ip addresses
-  //If you want the server to listen on a single ip address use the line below insead
-  //inet_aton("1.2.3.4", &server_addr.sin_addr)
-
-  //Setting bind port
-  server_addr.sin_port = htons (atoi (argv[1]));
-
-  printf ("Binding socket to port %s\n", argv[1]);
-
-  //Binding server
-
-  if (bind (server_fd, (struct sockaddr *) &server_addr, sizeof (server_addr))
-      < 0)
-    {
-      perror ("Bind error.\n");
-      exit (EXIT_FAILURE);
-    }
-
-  printf ("Listening.\n");
-
-  //Listening for incoming connections
-
-  if (listen (server_fd, 3) < 0)
-    {
-      perror ("Listen error.\n");
-      exit (EXIT_FAILURE);
-    }
-
-  FD_ZERO (&master);		// clear the master and temp sets
-
-  FD_ZERO (&read_fds);
-
-  FD_SET (server_fd, &master);
-
-  fdmax = server_fd;
-
-  client_count = 0;
-
-  while (1)
-    {
-      read_fds = master;
-
-      if (select (fdmax + 1, &read_fds, NULL, NULL, NULL) == -1)
-	{
-	  perror ("Select error.\n");
-	  exit (EXIT_FAILURE);
-	}
-
-      int i;
-
-      for (i = 0; i <= fdmax; i++)
-	{
-	  if (FD_ISSET (i, &read_fds))
-	    {
-	      //int crt = i;
-
-	      if (i == server_fd)
-		{
-		  struct sockaddr_in client_addr;
-
-		  int client =
-		    accept (server_fd, (struct sockaddr *) &client_addr,
-			    (socklen_t *) & addrlen);
-
-		  if (client < 0)
-		    {
-		      perror ("Accept error.\n");
-		      exit (EXIT_FAILURE);
-		    }
-
-		  printf ("New client connected: %s:%d.\n",
-			  inet_ntoa (client_addr.sin_addr),
-			  client_addr.sin_port);
-
-		  FD_SET (client, &master);
-
-		  if (client > fdmax)
-		    {
-		      fdmax = client;
-		    }
-
-		  client_count++;
-
-		  sprintf (buf, "Wellcome to the server!! You are client %d",
-			   client_count);
-
-		  send (client, buf, strlen (buf) + 1, 0);
-
-		}
-	      else //if a clinet sent a meesage
-		{
-		  int rcv = recv (i, buf, sizeof (buf), 0);
-
-		  if (rcv == 0)
-		    {
-		      printf ("Client %d hung up.\n", i - 3);
-		      close (i);
-		      FD_CLR (i, &master);
-		      continue;
-		    }
-		  if (rcv < 0)
-		    {
-		      perror ("Recv error.");
-		      close (i);
-		      FD_CLR (i, &master);
-		      continue;
-		    }
-		  else
-		    {
-		      char tmpbuf[1024];
-
-		      buf[rcv] = 0;
-		      int snd =
-			sprintf (tmpbuf, "Client %d saies: %s", i - 3, buf);
-
-		      int j;
-
-		      for (j = 0; j <= fdmax; j++)
-			{
-
-			  if (FD_ISSET (j, &master))
-
-			    if (j != server_fd && j != i)
-
-			      if (send (j, tmpbuf, snd, 0) == -1)
-
-				perror ("Send error.");
-
-			}
-		    }
-		}
-
-	    }
-	}
-
-    }
-
-  return 0;
+  }
 }
