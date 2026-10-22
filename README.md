@@ -4,7 +4,7 @@ Client-server examples in C and Python for the UBB Computer Networks course. The
 versions of each example use the **same wire protocol**, so any client works with any server
 (except where a note says otherwise).
 
-Wire conventions (see `c-sockets-theory.md` and `python-sockets-theory.md`):
+Wire conventions (see [c-sockets-theory.md](c-sockets-theory.md) and [python-sockets-theory.md](python-sockets-theory.md)):
 integers are big-endian (network order), a string is `u32 length in bytes + UTF-8 bytes`,
 and TCP reads/writes loop until all bytes are transferred (`recv_all`/`recv_exact`).
 
@@ -16,8 +16,8 @@ and TCP reads/writes loop until all bytes are transferred (`recv_all`/`recv_exac
 | `py-examples/tcp/<example>/`, `py-examples/udp/<example>/` | Python versions (same structure, also self-contained: `recv_exact`, `send_msg`, ... are defined in each file) |
 | `py-examples/practice/` | custom exercise (see below) |
 | `Makefile` | builds all C programs into `build/` |
-| `c-sockets-theory.md` | theory notes on C sockets (from lectures C1/C2 and Labs 1/2) |
-| `python-sockets-theory.md` | theory notes on Python TCP/UDP sockets |
+| [`c-sockets-theory.md`](c-sockets-theory.md) | theory notes on C sockets (from lectures C1/C2 and Labs 1/2) |
+| [`python-sockets-theory.md`](python-sockets-theory.md) | theory notes on Python TCP/UDP sockets |
 
 ## Examples
 
@@ -70,4 +70,4 @@ python3 server.py                 # terminal 1
 python3 client.py                 # terminals 2 and 3 (or: python3 client.py <server_ip>)
 ```
 
-See `practice.txt` for the original task description.
+See [practice.txt](practice.txt) for the original task description.
